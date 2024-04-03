@@ -7,6 +7,7 @@ from googleapiclient.discovery import build
 import datetime
 from openai import OpenAI
 from pytz import timezone
+import random
 import logging
 app = Flask(__name__)
 
@@ -16,71 +17,151 @@ flow = InstalledAppFlow.from_client_secrets_file('client_secret.json', SCOPES)
 creds = flow.run_local_server(port=0)
 service = build('calendar', 'v3', credentials=creds)
 
+booked_appointments = []
+
 def suggest_free_slots():
-    # Get the current date and time in Europe/Berlin timezone
+    # Hole das aktuelle Datum und die Uhrzeit in der Zeitzone Europe/Berlin
     berlin_timezone = timezone('Europe/Berlin')
     now = datetime.datetime.now(berlin_timezone)
     
-    # Round the current time to the nearest 15 minutes
-    current_time = now.replace(minute=now.minute // 15 * 15, second=0, microsecond=0)
+    # Setze die Start- und Endzeit für heute und morgen
+    today_start = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    today_end = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    tomorrow_start = (now + datetime.timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+    tomorrow_end = (now + datetime.timedelta(days=1)).replace(hour=16, minute=0, second=0, microsecond=0)
     
-    # Set the start and end times for the next 7 days
-    start_time = current_time.isoformat()
-    end_time = (current_time + datetime.timedelta(days=7)).isoformat()
+    # Hole die Liste der Ereignisse für heute und morgen
+    today_events_str = get_events(today_start.isoformat(), today_end.isoformat())
+    tomorrow_events_str = get_events(tomorrow_start.isoformat(), tomorrow_end.isoformat())
     
-    # Get the list of events in the next 7 days
-    events = get_events(start_time, end_time)
+    # Konvertiere die Ereignisse von einer Zeichenkette zurück zu einer Liste von Dictionaries
+    today_events = []
+    if today_events_str != "No events found.":
+        for event_str in today_events_str.split("\n"):
+            start = event_str.split(" to ")[0].split("Event from ")[1]
+            end = event_str.split(" to ")[1]
+            today_events.append({
+                "start": start,
+                "end": end
+            })
     
-    # Generate free time slots
-    free_slots = []
-    while current_time < now + datetime.timedelta(days=7):
-        # Check if the current time slot is available
+    tomorrow_events = []
+    if tomorrow_events_str != "No events found.":
+        for event_str in tomorrow_events_str.split("\n"):
+            start = event_str.split(" to ")[0].split("Event from ")[1]
+            end = event_str.split(" to ")[1]
+            tomorrow_events.append({
+                "start": start,
+                "end": end
+            })
+    
+    # Generiere freie Zeitfenster für heute
+    today_slots = []
+    current_time = today_start
+    while current_time < today_end:
         slot_start = current_time
         slot_end = slot_start + datetime.timedelta(minutes=30)
         
-        # Check if the time slot overlaps with any existing events
+        # Überprüfe, ob das Zeitfenster mit gebuchten Terminen überlappt
         overlaps = False
-        for event in events:
-            event_start = datetime.datetime.fromisoformat(event['start'].get('dateTime', event['start'].get('date')))
-            event_end = datetime.datetime.fromisoformat(event['end'].get('dateTime', event['end'].get('date')))
+        for event in today_events:
+            event_start = datetime.datetime.fromisoformat(event['start'])
+            event_end = datetime.datetime.fromisoformat(event['end'])
             if (slot_start < event_end) and (slot_end > event_start):
                 overlaps = True
                 break
         
-        if not overlaps:
-            free_slots.append({
+        if not overlaps and slot_start > now:
+            today_slots.append({
                 "start": slot_start.isoformat(),
                 "end": slot_end.isoformat()
             })
         
         current_time += datetime.timedelta(minutes=30)
     
-    # Select the first 3 free slots
-    suggested_slots = free_slots[:3]
+    # Generiere freie Zeitfenster für morgen
+    tomorrow_slots = []
+    current_time = tomorrow_start
+    while current_time < tomorrow_end:
+        slot_start = current_time
+        slot_end = slot_start + datetime.timedelta(minutes=30)
+        
+        # Überprüfe, ob das Zeitfenster mit gebuchten Terminen überlappt
+        overlaps = False
+        for event in tomorrow_events:
+            event_start = datetime.datetime.fromisoformat(event['start'])
+            event_end = datetime.datetime.fromisoformat(event['end'])
+            if (slot_start < event_end) and (slot_end > event_start):
+                overlaps = True
+                break
+        
+        if not overlaps:
+            tomorrow_slots.append({
+                "start": slot_start.isoformat(),
+                "end": slot_end.isoformat()
+            })
+        
+        current_time += datetime.timedelta(minutes=30)
     
-    # Format the suggested slots as a string
+    # Wähle die vorgeschlagenen Zeitfenster basierend auf der Verfügbarkeit
+    if today_slots and len(today_slots) >= 3:
+        suggested_slots = today_slots[:3]
+    else:
+        suggested_slots = tomorrow_slots[:3]
+    
+    # Formatiere die vorgeschlagenen Zeitfenster als Zeichenkette
     if suggested_slots:
-        slot_details = []
+        slot_times = []
         for slot in suggested_slots:
             start_time = datetime.datetime.fromisoformat(slot['start'])
-            end_time = datetime.datetime.fromisoformat(slot['end'])
-            slot_details.append(f"- {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%H:%M')}")
+            slot_times.append(start_time.strftime('%H:%M'))
         
-        return "Here are some available time slots for an appointment:\n" + "\n".join(slot_details) + "\nPlease let me know if any of these time slots work for you, or if you prefer a different time."
+        if suggested_slots[0]['start'].startswith(now.strftime('%Y-%m-%d')):
+            return f"Hier sind meine Vorschläge für unseren Termin heute: {', '.join(slot_times)} Uhr. Welcher Zeitpunkt passt dir am besten?"
+        else:
+            return f"Hier sind meine Vorschläge für unseren Termin morgen: {', '.join(slot_times)} Uhr. Welcher Zeitpunkt passt dir am besten?"
     else:
-        return "I apologize, but there are no available time slots for an appointment in the next 7 days. Please check back later or let me know if you have any other questions."
+        return "Entschuldige, aber ich habe heute und morgen leider keine freien Termine mehr. Bitte schau zu einem späteren Zeitpunkt nochmal nach oder lass mich wissen, wenn du noch andere Fragen hast."
 
 def create_event(event):
-    # Set the timezone for the event
-    event['start']['timeZone'] = 'Europe/Berlin'
-    event['end']['timeZone'] = 'Europe/Berlin'
+    # Überprüfe auf überlappende Ereignisse
+    start_time = event['start']['dateTime']
+    end_time = event['end']['dateTime']
+    conflicts = get_conflicts(start_time, end_time)
     
-    event = service.events().insert(calendarId='primary', body=event).execute()
-    start = event['start'].get('dateTime', event['start'].get('date'))
-    end = event['end'].get('dateTime', event['end'].get('date'))
-    summary = event['summary']
-    return f"Event created: {summary} from {start} to {end}"
+    if conflicts:
+        return f"Entschuldigung, aber der gewählte Zeitraum überschneidet sich mit folgenden Terminen:\n{conflicts}\nBitte wähle einen anderen Zeitpunkt."
+    else:
+        event = service.events().insert(calendarId='primary', body=event).execute()
+        start = event['start'].get('dateTime', event['start'].get('date'))
+        end = event['end'].get('dateTime', event['end'].get('date'))
+        summary = event['summary']
+        return f"Termin erstellt: {summary} von {start} bis {end}"
 
+def get_conflicts(start_time, end_time):
+    # Überprüfe auf überlappende Ereignisse in der Liste der gebuchten Termine
+    conflicts = []
+    for appointment in booked_appointments:
+        if (start_time < appointment['end']) and (end_time > appointment['start']):
+            conflicts.append(appointment)
+    
+    if conflicts:
+        conflict_details = []
+        for conflict in conflicts:
+            start = conflict['start']
+            end = conflict['end']
+            summary = conflict['summary']
+            conflict_details.append(f"- {start} bis {end}: {summary}")
+        
+        return "\n".join(conflict_details)
+    else:
+        return ""
+
+def send_calendar_link(calendar_link=None):
+    if calendar_link is None:
+        calendar_link = 'https://calendar.app.google/iHxGb2B3D6V1arUX7'
+    message = f"Hier ist der Link zu meinem Google Calendar Booking: {calendar_link}"
+    return message
 def get_event(event_id):
     event = service.events().get(calendarId='primary', eventId=event_id).execute()
     return event
@@ -93,27 +174,21 @@ def delete_event(event_id):
     service.events().delete(calendarId='primary', eventId=event_id).execute()
     return f"Event with ID {event_id} deleted successfully."
 
-def get_conflicts(start_time, end_time):
-    events_result = service.events().list(calendarId='primary', timeMin=start_time, timeMax=end_time,
-                                          maxResults=100, singleEvents=True, orderBy='startTime').execute()
-    events = events_result.get('items', [])
-    return events
-
 def get_events(start_time, end_time):
     events_result = service.events().list(calendarId='primary', timeMin=start_time, timeMax=end_time,
                                           maxResults=100, singleEvents=True, orderBy='startTime').execute()
     events = events_result.get('items', [])
     
     if not events:
-        return []  # Return an empty list if no events are found
+        return "No events found."
     
-    event_details = []
+    formatted_events = []
     for event in events:
         start = event['start'].get('dateTime', event['start'].get('date'))
-        summary = event['summary']
-        event_details.append(f"- {start}: {summary}")
+        end = event['end'].get('dateTime', event['end'].get('date'))
+        formatted_events.append(f"Event from {start} to {end}")
     
-    return events  # Return the list of events
+    return "\n".join(formatted_events)
 
 def get_current_datetime_and_timezone():
     berlin_timezone = timezone('Europe/Berlin')
@@ -149,7 +224,7 @@ def chatbot():
 
     # Initialize the client
     client = openai.OpenAI(api_key="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")
-    assistant_id = 'asst_s8bBrzftO6ZU9Ij33noyNwTJ'
+    assistant_id = 'asst_zaj8GyB8318LOshH9657MMLU'
 
     try:
         # Step 1: Create a Thread
@@ -158,45 +233,54 @@ def chatbot():
         # Step 3: Add the prompt as a Message to the Thread
         chat_history_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history])
         prompt = f"""
-    I am Max, your friendly neighborhood real estate guru specializing in the most incredible properties in Bali! I'm here to help you discover your dream lifestyle and make it a reality. Let's dive into this exciting world together and find the perfect investment opportunity for you!
+        Ich bin Max, ein Experte für Immobilien in Bali. Mein Ziel ist es, dir dabei zu helfen, die perfekte Investitionsmöglichkeit zu finden.
 
-    Key Responsibilities:
+        Aufgaben:
 
-    Keep the conversation fun, engaging, and totally casual, just like chatting with your best bud!
-    Use my charm and wit to paint a picture of the amazing life you could have in Bali.
-    Ask you thought-provoking questions to help you realize why investing in Bali is the smartest move you could make.
-    Share stories that'll make you feel like you're already living the high life in your very own Balinese paradise.
-    Create a sense of excitement and urgency, so you'll want to act fast and seize this once-in-a-lifetime opportunity.
-    Suggest the perfect times for us to connect over a call, all based on your schedule and German time, of course!
-    Address any concerns you might have and show you why investing in Bali is a total no-brainer.
-    Follow up with personalized reminders and messages to keep you motivated and on track.
-    Guide our conversation in a natural way towards setting up a call, so we can make your dreams a reality.
-    AIDA Marketing Framework:
+        Kommuniziere auf Deutsch
+        Führe professionelle Gespräche
+        Hebe die Vorteile einer Investition in Bali hervor
+        Stelle Fragen, um die Bedürfnisse des Kunden zu verstehen
+        Teile relevante Erfolgsgeschichten
+        Vermittle ein Gefühl von Chance und Dringlichkeit
+        Verwende immer Funktionsaufrufe für zeitbezogene Aufgaben
+        Bevor ein Termin vorgeschlagen oder eingetragen wird, überprüfe mit der get_events-Funktion, welche Zeitfenster verfügbar sind, um Überschneidungen zu vermeiden
+        Wenn es für den aktuellen Tag bereits spät ist, schlage Termine für den nächsten Tag vor. Der Tag für Calls geht von 8 Uhr deutscher Zeit bis 16 Uhr deutscher Zeit
+        Vermeide Doppelbuchungen, indem du vor dem Vorschlagen eines Termins die Verfügbarkeit überprüfst
+        Schlage die besten verfügbaren Zeiten für ein Telefonat basierend auf deinem Zeitplan vor (nur deutsche Zeit, ohne Erwähnung der Bali-Zeit)
+        Format Beispiel: "Ich habe um 12, 15 oder 20 Uhr Zeit für dich. Welche Zeit passt dir am besten?"
+        Wenn der Benutzer eine bestimmte Zeit angibt, verwende sofort den create_event-Funktionsaufruf, um den Termin direkt zum Google Kalender hinzuzufügen (immer in deutscher Zeitzone), sofern der Slot frei ist
+        Füge den Termin direkt hinzu, ohne auf weitere Bestätigung zu warten, wenn der Slot verfügbar ist
+        Informiere den Benutzer, dass der Termin erfolgreich geplant wurde oder dass der gewünschte Slot bereits belegt ist
+        Wenn alle Termine für den heutigen Tag voll sind oder der Benutzer keine Zeit hat, frage, ob er einen Termin an einem anderen Tag machen möchte
+        Wenn der Benutzer auch an einem anderen Tag keine Zeit hat oder keinen Termin machen möchte, gib ihm diesen Google Calendar Link, damit er einen Termin machen kann, wann immer er will: https://calendar.app.google/iHxGb2B3D6V1arUX7
+        Gehe auf Bedenken ein und zeige, warum Bali eine kluge Investition ist
+        Verfolge mit personalisierten Nachrichten nach
+        Lenke das Gespräch in Richtung Vereinbarung eines Anrufs
+        Verkaufsrahmen:
 
-    Grab your attention with an irresistible opening that'll make you want to learn more.
-    Pique your interest by sharing all the incredible features and benefits of these luxurious properties.
-    Create a burning desire for the lifestyle you could have by painting a vivid picture of your dream life in Bali.
-    Guide you towards taking action by suggesting the best times for us to chat and make it happen.
-    Proactive Call Scheduling:
-    - Keep an eye out for the perfect moments in our conversation to suggest a call, so it feels natural and exciting.
-    - When you mention a specific day or show interest, I'll use my magic 'suggest_free_slots' function to find the best times for us to connect.
-    - Double-check with my trusty 'get_current_datetime_and_timezone' function to ensure our call is always scheduled at the perfect time for you, in German time.
-    - Use the current date information to provide accurate day and date references when suggesting call times.
-    - Confidently offer you three amazing options for our call, making it feel like an exclusive opportunity to explore these incredible properties together.
-    - Once you've picked the best time for you, I'll use my 'create_event' function to lock it in and make it official!
-    - Send you a confirmation of our scheduled call, with all the details in German time, so you're always in the loop.
-    
-    Function Calls:
-    Whenever we're planning, rescheduling, or canceling calls, I'll use my handy functions to make it a breeze:
-    - 'suggest_free_slots': Finds the best times for us to connect and chat on the user's preferred date. If no specific date is mentioned, assume the current date.
-    - 'create_event': Makes our call official by adding it to the calendar.
-    - 'update_event': Allows us to easily reschedule if needed, so it's always convenient for you.
-    - 'delete_event': Cancels our call and removes it from the calendar, if necessary.
-    - 'get_current_datetime_and_timezone': Keeps me on top of the current date and time in German time, so I'm always suggesting the best options for you.
-    - When asked about a specific date without a year, assume the current year from 'get_current_datetime_and_timezone' to provide accurate weekday information.
+        Aufmerksamkeit: Fesselnder Einstieg, der Interesse weckt
+        Interesse: Teile die wichtigsten Merkmale und Vorteile
+        Verlangen: Beschreibe den Lebensstil und das Potenzial in Bali
+        Handlung: Führe zur Vereinbarung eines Anrufs, um weitere Einzelheiten zu besprechen
+        Funktionsaufrufe (Obligatorisch):
+
+        Verwende geeignete Funktionsaufrufe für alle Aufgaben
+        send_calendar_link: Sende dem Benutzer den Link zu deinem Google Kalender, falls er keine Zeit hat oder ihm die Termine nicht passen.Sobald der user sagt er hat keine zeit schick ihm umgehend den link. Schick den link sobald der user einen anderen termin will oder keine zeit hat
+        get_events: Hole die Liste der Ereignisse, um verfügbare Zeitfenster zu ermitteln und Überschneidungen zu vermeiden. Lasse niemals Doppelbuchungen zu.
+        Wenn keine Ereignisse gefunden werden, gebe "No events found." zurück und nutze dann die create_event Funktion, um ein Event zu kreieren.
+        Wenn ein Ergebnis gefunden wird, gebe "Events found" zurück und buche keinen Termin, sondern sag dem User, dass du zu der gewünschten Zeit keine Verfügbarkeit hast.
+        suggest_free_slots: Finde die besten verfügbaren Zeiten für eine Verbindung basierend auf dem bevorzugten Datum und mache nur Termine, die mindestens eine Stunde von der aktuellen Zeit entfernt sind (gehe vom aktuellen Datum aus, wenn nicht angegeben). Schlage niemals belegte Slots vor.
+        Formatiere die Ausgabe als: "Ich habe morgen um (erste Uhrzeit), (zweite Uhrzeit), (dritte Uhrzeit) Uhr Zeit für dich. Welche Zeit passt dir am besten?"
+        create_event: Plane den Anruf sofort im Kalender ein, wenn der Benutzer selbst eine Zeit angibt (immer in deutscher Zeitzone) und der Slot frei ist. Keine weitere Bestätigung erforderlich. Wenn der Slot belegt ist, informiere den Benutzer darüber.
+        update_event: Verschiebe den Anruf bei Bedarf
+        delete_event: Storniere den Anruf und entferne ihn aus dem Kalender. Lösche niemals ein Event.
+        get_current_datetime_and_timezone: Hole das aktuelle Datum und die Uhrzeit in deutscher Zeit für eine genaue Planung
+        Wenn ein Datum ohne Jahr erwähnt wird, gehe vom aktuellen Jahr aus get_current_datetime_and_timezone aus
+        Ich werde durchgängig die erforderlichen Funktionsaufrufe für zeitbezogene Aufgaben verwenden, um eine ordnungsgemäße Integration in Google Calendar zu gewährleisten.
+
+        Während des gesamten Chats werde ich einen professionellen Ton beibehalten und das Gespräch in Richtung Vereinbarung eines Anrufs lenken. Alle Zeiten basieren ausschließlich auf der deutschen Zeit, ohne Erwähnung der Bali-Zeit.
         
-    Throughout our chat, I'll keep things fun, engaging, and totally natural, while subtly guiding us towards setting up a call using my persuasion skills and the AIDA framework. And don't worry, I'll make sure all the times we discuss are in German time, so there's never any confusion!
-            
         Chat History:
         {chat_history_str}
         User: {user_input}
@@ -301,6 +385,13 @@ def chatbot():
                         tool_outputs.append({
                             "tool_call_id": action['id'],
                             "output": output_str
+                        })
+                    elif func_name == "send_calendar_link":
+                        calendar_link = arguments.get('calendar_link', None)
+                        output = send_calendar_link(calendar_link)
+                        tool_outputs.append({
+                            "tool_call_id": action['id'],
+                            "output": output
                         })
                     else:
                         raise ValueError(f"Unknown function: {func_name}")
