@@ -26,7 +26,12 @@ GOOGLE_CLIENT_ID = "803791243229-tphm5c2513khcqsrqt493r0qr1tsog59.apps.googleuse
 client_secrets_file = os.path.join(pathlib.Path(__file__).parent, "client_secret.json")
 
 # Google Calendar API setup
-SCOPES = ['https://www.googleapis.com/auth/calendar']
+SCOPES = [
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/userinfo.profile',
+    'openid'
+]
 flow = Flow.from_client_secrets_file(client_secrets_file, SCOPES, redirect_uri='http://127.0.0.1:5000/callback')
 
 service = None
@@ -290,19 +295,27 @@ def callback():
 
     try:
         flow.fetch_token(authorization_response=request.url, state=state)
+        credentials = flow.credentials
+
+        if credentials.id_token is None:
+            raise ValueError("ID Token is missing in the credentials")
+
+        idinfo = id_token.verify_oauth2_token(credentials.id_token, google_requests.Request(), GOOGLE_CLIENT_ID)
+        session['google_id'] = idinfo.get('sub')
+
+        session["credentials"] = {
+            'token': credentials.token,
+            'refresh_token': credentials.refresh_token,
+            'token_uri': credentials.token_uri,
+            'client_id': credentials.client_id,
+            'client_secret': credentials.client_secret,
+            'scopes': credentials.scopes
+        }
     except Exception as e:
-        app.logger.error(f"Error during token fetching: {e}")
+        app.logger.error(f"Error during the callback process: {e}")
         app.logger.error(f"Full traceback: {format_exc()}")
         return "An error occurred during authentication.", 500
-    credentials = flow.credentials
-    session["credentials"] = {
-        'token': credentials.token,
-        'refresh_token': credentials.refresh_token,
-        'token_uri': credentials.token_uri,
-        'client_id': credentials.client_id,
-        'client_secret': credentials.client_secret,
-        'scopes': credentials.scopes
-    }
+
     return redirect("/chatbot")
 
 @app.route("/")
