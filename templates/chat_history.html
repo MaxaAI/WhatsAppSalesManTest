@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Chat History</title>
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <style>
+        body {
+            background: #1a1a1d; /* Dunkler Hintergrund */
+            font-family: Arial, sans-serif;
+            color: #e4e6eb;
+            padding: 20px;
+        }
+        .chat-message {
+            border-radius: 10px;
+            padding: 10px;
+            margin: 5px 0;
+            max-width: 80%;
+        }
+        .user-message {
+            background-color: #4b4f58; /* Dunklere Nachrichten für den Benutzer */
+            float: right;
+            clear: both;
+        }
+        .assistant-message {
+            background-color: #343746; /* Hellere Nachrichten für den Assistant */
+            float: left;
+            clear: both;
+        }
+    </style>
+</head>
+<body>
+    <h1 class="text-center mb-4">Chat History</h1>
+    <div id="chatbox">
+        {% for message in chat_history %}
+            <div class="chat-message {% if message.role == 'user' %}user-message{% else %}assistant-message{% endif %}">
+                <strong>{{ message.role|capitalize }}</strong>: {{ message.content }}
+            </div>
+        {% endfor %}
+    </div>
+</body>
+</html>

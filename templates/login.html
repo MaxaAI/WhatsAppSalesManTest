@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login</title>
+    <!-- Add any other head elements like CSS links -->
+</head>
+<body>
+    <h2>Login</h2>
+    <form method="POST" action="{{ url_for('login') }}">
+        <label for="email">Email:</label><br>
+        <input type="email" id="email" name="email" required><br>
+        
+        <label for="password">Password:</label><br>
+        <input type="password" id="password" name="password" required><br>
+        
+        <input type="submit" value="Login">
+    </form>
+    <!-- Link to registration page if you have one -->
+    <p>Don't have an account? <a href="{{ url_for('register') }}">Register here</a></p>
+</body>
+</html>
