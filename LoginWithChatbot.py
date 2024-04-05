@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, redirect, render_template, session, abort
 import openai
 from traceback import format_exc
+import requests
 import time
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
@@ -14,12 +15,31 @@ import random
 import logging
 import os
 import pathlib
+from flask_migrate import Migrate
 import string
 import random
 from google.auth.transport.requests import Request
+from flask_sqlalchemy import SQLAlchemy
+from functools import wraps
 
 app = Flask(__name__)
+# Your SQLAlchemy database URI
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///test.db' 
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
 app.secret_key = "0509Maxi."
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    google_access_token = db.Column(db.String(255), nullable=True)
+    google_refresh_token = db.Column(db.String(255), nullable=True)
+    def __repr__(self):
+        return '<User %r>' % self.email
+    
+    
+with app.app_context():
+    db.create_all()
 
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 GOOGLE_CLIENT_ID = "803791243229-tphm5c2513khcqsrqt493r0qr1tsog59.apps.googleusercontent.com"
@@ -37,11 +57,12 @@ flow = Flow.from_client_secrets_file(client_secrets_file, SCOPES, redirect_uri='
 service = None
 
 def login_is_required(function):
+    @wraps(function)
     def wrapper_login_required(*args, **kwargs):
         if "google_id" not in session:
             return abort(401)  # Authorization required
         else:
-            return function()
+            return function(*args, **kwargs)
     return wrapper_login_required
 
 @app.route("/chatbot")
@@ -287,40 +308,84 @@ def login():
     authorization_url, _ = flow.authorization_url(state=state)
     return redirect(authorization_url)
 
+@app.route("/emails")
+def list_emails():
+    users = User.query.all()
+    emails = [user.email for user in users]
+    return jsonify(emails)
+
+def get_user_info(credentials):
+    userinfo_endpoint = 'https://openidconnect.googleapis.com/v1/userinfo'
+    headers = {'Authorization': f'Bearer {credentials.token}'}
+    response = requests.get(userinfo_endpoint, headers=headers)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        app.logger.error(f"Failed to get user info: {response.content}")
+        response.raise_for_status()
+
 @app.route("/callback")
 def callback():
+    # Retrieve the state from the session to compare with the state returned in the query string
     state = session.get('state')
     received_state = request.args.get('state')
+
+    # Log the received state for debugging purposes
     app.logger.info(f"Session state: {state}, Received state: {received_state}")
 
     try:
-        flow.fetch_token(authorization_response=request.url, state=state)
+        # Attempt to fetch the token using the authorization response URL
+        flow.fetch_token(authorization_response=request.url)
+
+        # At this point, flow.credentials will have been populated
         credentials = flow.credentials
 
+        # Store the credentials in the session
+        session["credentials"] = credentials_to_dict(credentials)
+
+        # Verify the ID token is present in the credentials
         if credentials.id_token is None:
             raise ValueError("ID Token is missing in the credentials")
 
-        idinfo = id_token.verify_oauth2_token(credentials.id_token, google_requests.Request(), GOOGLE_CLIENT_ID)
-        session['google_id'] = idinfo.get('sub')
+        # Fetch the user's info using the token
+        userinfo = get_user_info(credentials)
 
-        session["credentials"] = {
-            'token': credentials.token,
-            'refresh_token': credentials.refresh_token,
-            'token_uri': credentials.token_uri,
-            'client_id': credentials.client_id,
-            'client_secret': credentials.client_secret,
-            'scopes': credentials.scopes
-        }
+        # Extract the email from the userinfo
+        user_email = userinfo.get('email')
+
+        # Look up the user by email, create if not present
+        # After fetching user info
+        user = User.query.filter_by(email=user_email).first()
+        if not user:
+            user = User(email=user_email)
+
+        # Save the tokens in the User model
+        user.google_access_token = credentials.token
+        user.google_refresh_token = credentials.refresh_token
+        db.session.add(user)
+        db.session.commit()
+
+        # Add the user's Google ID (subject identifier) to the session
+        session['google_id'] = userinfo.get('sub')
+
+        # Redirect the user to the chatbot page
+        return redirect("/chatbot")
+
     except Exception as e:
+        # Log the exception and return an error message
         app.logger.error(f"Error during the callback process: {e}")
         app.logger.error(f"Full traceback: {format_exc()}")
         return "An error occurred during authentication.", 500
 
-    return redirect("/chatbot")
-
 @app.route("/")
 def index():
     return render_template("index.html")
+
+@app.route("/admin/emails", endpoint="admin_emails")
+@login_is_required
+def admin_emails():
+    users = User.query.all()
+    return render_template("admin_emails.html", users=users)
 
 @app.route("/api/chatbot", methods=["POST"], endpoint="chatbot_api")
 @login_is_required
