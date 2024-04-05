@@ -1,0 +1,8 @@
+flask
+openai
+requests
+google-auth-oauthlib
+logging
+flask_sqlalchemy
+pytz
+flask_migrate
