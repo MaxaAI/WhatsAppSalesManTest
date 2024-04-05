@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect, render_template, session, abort
+from flask import Flask, request, jsonify, redirect, render_template, session, abort, url_for
 import openai
 from traceback import format_exc
 import requests
@@ -41,6 +41,15 @@ class User(db.Model):
 with app.app_context():
     db.create_all()
 
+class ChatMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    content = db.Column(db.String(1024), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+    def __repr__(self):
+        return '<ChatMessage {}>'.format(self.content)
+
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 GOOGLE_CLIENT_ID = "803791243229-tphm5c2513khcqsrqt493r0qr1tsog59.apps.googleusercontent.com"
 client_secrets_file = os.path.join(pathlib.Path(__file__).parent, "client_secret.json")
@@ -59,8 +68,8 @@ service = None
 def login_is_required(function):
     @wraps(function)
     def wrapper_login_required(*args, **kwargs):
-        if "google_id" not in session:
-            return abort(401)  # Authorization required
+        if "user_id" not in session:  # Verwenden Sie 'user_id' zur Überprüfung
+            return abort(401)  # Nicht autorisiert
         else:
             return function(*args, **kwargs)
     return wrapper_login_required
@@ -85,6 +94,19 @@ def chatbot():
     service = build('calendar', 'v3', credentials=creds)
     
     return render_template("chatbot.html")
+
+@app.route('/buy_full_version', methods=['GET', 'POST'])
+def purchase_full_version():
+    if request.method == 'POST':
+        client_secret_file = request.files['client_secret']
+        phone_number = request.form['phone_number']
+
+        # Hier können Sie die erhaltenen Daten verarbeiten
+        # Zum Beispiel: Speichern Sie die Daten in der Datenbank und weisen Sie den Chatbot dem Benutzer zu
+
+        return redirect(url_for('success'))  # Leiten Sie zu einer Erfolgsmeldung oder einer anderen Seite weiter
+
+    return render_template('buy_full_version.html')
 
 def credentials_to_dict(credentials):
     return {
@@ -217,10 +239,11 @@ def create_event(event):
         return f"Entschuldigung, aber der gewählte Zeitraum überschneidet sich mit folgenden Terminen:\n{conflicts}\nBitte wähle einen anderen Zeitpunkt."
     else:
         event = service.events().insert(calendarId='maximilianradomski@gmail.com', body=event).execute()
+        user = event['creator']['email']
         start = event['start'].get('dateTime', event['start'].get('date'))
         end = event['end'].get('dateTime', event['end'].get('date'))
         summary = event['summary']
-        return f"Termin erstellt: {summary} von {start} bis {end}"
+        return f"Termin erstellt: {summary} von {start} bis {end} mit {user}"
 
 def get_conflicts(start_time, end_time):
     # Überprüfe auf überlappende Ereignisse in der Liste der gebuchten Termine
@@ -300,6 +323,14 @@ def get_next_dates_and_weekdays(num_days=7):
 
 chat_history = []
 
+@app.route("/user/<int:user_id>/chat_history")
+@login_is_required
+def view_chat_history(user_id):
+    if session.get('user_id') != user_id:
+        abort(403)  # Forbidden access if the logged-in user ID doesn't match the requested user ID
+
+    chat_history = ChatMessage.query.filter_by(user_id=user_id).order_by(ChatMessage.timestamp).all()
+    return render_template('chat_history.html', chat_history=chat_history)
 
 @app.route("/login")
 def login():
@@ -343,30 +374,30 @@ def callback():
         # Store the credentials in the session
         session["credentials"] = credentials_to_dict(credentials)
 
-        # Verify the ID token is present in the credentials
+            # Verify the ID token is present in the credentials
         if credentials.id_token is None:
             raise ValueError("ID Token is missing in the credentials")
 
-        # Fetch the user's info using the token
+            # Fetch the user's info using the token
         userinfo = get_user_info(credentials)
 
-        # Extract the email from the userinfo
+            # Extract the email from the userinfo
         user_email = userinfo.get('email')
 
-        # Look up the user by email, create if not present
-        # After fetching user info
+            # Nach erfolgreicher Authentifizierung
         user = User.query.filter_by(email=user_email).first()
         if not user:
-            user = User(email=user_email)
-
-        # Save the tokens in the User model
-        user.google_access_token = credentials.token
-        user.google_refresh_token = credentials.refresh_token
-        db.session.add(user)
+                # Wenn kein Benutzer existiert, erstelle einen neuen mit den Tokens
+                user = User(email=user_email, google_access_token=credentials.token, google_refresh_token=credentials.refresh_token)
+                db.session.add(user)
+        else:
+                # Wenn der Benutzer existiert, aktualisiere die Tokens
+                user.google_access_token = credentials.token
+                user.google_refresh_token = credentials.refresh_token
         db.session.commit()
 
-        # Add the user's Google ID (subject identifier) to the session
-        session['google_id'] = userinfo.get('sub')
+        session['user_id'] = user.id  # Stellen Sie sicher, dass die User ID hier gespeichert wird
+
 
         # Redirect the user to the chatbot page
         return redirect("/chatbot")
@@ -387,13 +418,22 @@ def admin_emails():
     users = User.query.all()
     return render_template("admin_emails.html", users=users)
 
-@app.route("/api/chatbot", methods=["POST"], endpoint="chatbot_api")
+@app.route("/api/chatbot", methods=["POST"])
 @login_is_required
 def chatbot_api():
     data = request.get_json()
     user_input = data["message"]
-    chat_history.append({"role": "user", "content": user_input})
 
+    # Stellen Sie sicher, dass 'user_id' in der Session vorhanden ist
+    if 'user_id' not in session:
+        return jsonify({"error": "User not properly authenticated"}), 401
+
+    user_id = session['user_id']
+
+    # Speichern der Nachricht des Benutzers
+    user_message = ChatMessage(user_id=user_id, content=user_input)
+    db.session.add(user_message)
+    db.session.commit()
     # Initialize the client
     client = openai.OpenAI(api_key="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")
     assistant_id = "asst_aDHEdGjng0sZP7qooUiWSBiz"
@@ -489,6 +529,11 @@ def chatbot_api():
                 # Get the assistant's response
                 assistant_response = messages.data[0].content[0].text.value
                 chat_history.append({"role": "assistant", "content": assistant_response})
+
+                # Save the bot's response
+                bot_message = ChatMessage(user_id=user_id, content=assistant_response)
+                db.session.add(bot_message)
+                db.session.commit()
 
                 return jsonify({"response": assistant_response})
 
