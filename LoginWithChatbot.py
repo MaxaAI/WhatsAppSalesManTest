@@ -90,9 +90,7 @@ def chatbot():
             return redirect(authorization_url)
     session['credentials'] = credentials_to_dict(creds)
     
-    # Initialize the service object with the obtained credentials
     service = build('calendar', 'v3', credentials=creds)
-    
     return render_template("chatbot.html")
 
 @app.route('/buy_full_version', methods=['GET', 'POST'])
@@ -133,8 +131,13 @@ def suggest_free_slots():
     tomorrow_end = (now + datetime.timedelta(days=1)).replace(hour=16, minute=0, second=0, microsecond=0)
     
     # Hole die Liste der Ereignisse für heute und morgen
-    today_events_str = get_events(today_start.isoformat(), today_end.isoformat())
-    tomorrow_events_str = get_events(tomorrow_start.isoformat(), tomorrow_end.isoformat())
+    global service
+    if service is None:
+        return "Error: Google Calendar Service ist nicht initialisiert."
+
+    today_events_str = get_events(service, today_start.isoformat(), today_end.isoformat())
+    tomorrow_events_str = get_events(service, tomorrow_start.isoformat(), tomorrow_end.isoformat())
+
     
     # Konvertiere die Ereignisse von einer Zeichenkette zurück zu einer Liste von Dictionaries
     today_events = []
@@ -281,19 +284,25 @@ def delete_event(event_id):
     service.events().delete(calendarId='primary', eventId=event_id).execute()
     return f"Event with ID {event_id} deleted successfully."
 
-def get_events(start_time, end_time):
-    events_result = service.events().list(calendarId='primary', timeMin=start_time, timeMax=end_time,
-                                          maxResults=100, singleEvents=True, orderBy='startTime').execute()
-    events = events_result.get('items', [])
+def get_events(service, start_time, end_time):
     
-    if not events:
-        return "No events found."
+    print(f"Fetching events between {start_time} and {end_time}")
+    try:
+        events_result = service.events().list(calendarId='primary', timeMin=start_time, timeMax=end_time,
+                                              maxResults=100, singleEvents=True, orderBy='startTime').execute()
+        events = events_result.get('items', [])
     
-    formatted_events = []
-    for event in events:
-        start = event['start'].get('dateTime', event['start'].get('date'))
-        end = event['end'].get('dateTime', event['end'].get('date'))
-        formatted_events.append(f"Event from {start} to {end}")
+        if not events:
+            return "No events found."
+        
+        formatted_events = []
+        for event in events:
+            start = event['start'].get('dateTime', event['start'].get('date'))
+            end = event['end'].get('dateTime', event['end'].get('date'))
+            formatted_events.append(f"Event from {start} to {end}")
+    except Exception as e:
+        print(f"Error fetching events: {e}")  # Improved error handling
+        return "Error fetching events."
     
     return "\n".join(formatted_events)
 
@@ -418,6 +427,8 @@ def admin_emails():
     users = User.query.all()
     return render_template("admin_emails.html", users=users)
 
+chat_history = []
+
 @app.route("/api/chatbot", methods=["POST"])
 @login_is_required
 def chatbot_api():
@@ -436,7 +447,7 @@ def chatbot_api():
     db.session.commit()
     # Initialize the client
     client = openai.OpenAI(api_key="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")
-    assistant_id = "asst_aDHEdGjng0sZP7qooUiWSBiz"
+    assistant_id = "asst_srCXZw0EUitQ9Ha57UyKAHIj"
 
     try:
         # Step 1: Create a Thread
@@ -444,60 +455,62 @@ def chatbot_api():
 
         # Step 3: Add the prompt as a Message to the Thread
         chat_history_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history])
-        prompt = f"""
-        Ich bin Max, ein Experte für Immobilien in Bali. Mein Ziel ist es, dir dabei zu helfen, die perfekte Investitionsmöglichkeit zu finden.
+        # prompt = f"""{chat_history_str}\nUser: {user_input}\nAssistant:"
+        # Du bist ein Onboarder der Bali invest. Interagiere mit dem user und dem ziel einen anruf zu vereinbaren.
 
-        Aufgaben:
+        # Führe am anfang ein bisschen small talk um den user zu beruhigen und eine verbindung aufzubauen.
 
-        Kommuniziere auf Deutsch
-        Führe professionelle Gespräche
-        Hebe die Vorteile einer Investition in Bali hervor
-        Stelle Fragen, um die Bedürfnisse des Kunden zu verstehen
-        Teile relevante Erfolgsgeschichten
-        Vermittle ein Gefühl von Chance und Dringlichkeit
-        Verwende immer Funktionsaufrufe für zeitbezogene Aufgaben
-        Bevor ein Termin vorgeschlagen oder eingetragen wird, überprüfe mit der get_events-Funktion, welche Zeitfenster verfügbar sind, um Überschneidungen zu vermeiden
-        Wenn es für den aktuellen Tag bereits spät ist, schlage Termine für den nächsten Tag vor. Der Tag für Calls geht von 8 Uhr deutscher Zeit bis 16 Uhr deutscher Zeit
-        Vermeide Doppelbuchungen, indem du vor dem Vorschlagen eines Termins die Verfügbarkeit überprüfst
-        Schlage die besten verfügbaren Zeiten für ein Telefonat basierend auf deinem Zeitplan vor (nur deutsche Zeit, ohne Erwähnung der Bali-Zeit)
-        Format Beispiel: "Ich habe um 12, 15 oder 20 Uhr Zeit für dich. Welche Zeit passt dir am besten?"
-        Wenn der Benutzer eine bestimmte Zeit angibt, verwende sofort den create_event-Funktionsaufruf, um den Termin direkt zum Google Kalender hinzuzufügen (immer in deutscher Zeitzone), sofern der Slot frei ist
-        Füge den Termin direkt hinzu, ohne auf weitere Bestätigung zu warten, wenn der Slot verfügbar ist
-        Informiere den Benutzer, dass der Termin erfolgreich geplant wurde oder dass der gewünschte Slot bereits belegt ist
-        Wenn alle Termine für den heutigen Tag voll sind oder der Benutzer keine Zeit hat, frage, ob er einen Termin an einem anderen Tag machen möchte
-        Wenn der Benutzer auch an einem anderen Tag keine Zeit hat oder keinen Termin machen möchte, gib ihm diesen Google Calendar Link, damit er einen Termin machen kann, wann immer er will: https://calendar.app.google/iHxGb2B3D6V1arUX7
-        Gehe auf Bedenken ein und zeige, warum Bali eine kluge Investition ist
-        Verfolge mit personalisierten Nachrichten nach
-        Lenke das Gespräch in Richtung Vereinbarung eines Anrufs
-        Verkaufsrahmen:
+        # Sage nicht andauernd hallo oder schön das du fragen hast halte das gespräch flüssig und natürlich.
 
-        Aufmerksamkeit: Fesselnder Einstieg, der Interesse weckt
-        Interesse: Teile die wichtigsten Merkmale und Vorteile
-        Verlangen: Beschreibe den Lebensstil und das Potenzial in Bali
-        Handlung: Führe zur Vereinbarung eines Anrufs, um weitere Einzelheiten zu besprechen
-        Funktionsaufrufe (Obligatorisch):
+        # Du wiederholst dich nicht und achtest darauf was der user dir schreibt und antwortest dann darauf. Denke zuerst darüber nach, was der Benutzer gesagt hat,
+        # und antworte dann darauf. Vermeide es, dieselben Sätze immer wieder zu wiederholen und andauern hallo zu sagen bei jedem satz anfang. Gehe immer davon aus
+        # dass der user über das Resort redet.Bevor du einfach einen call einträgst gibt dem user die wahl zwischen drei calls. Nutze dafür diese funktionen step by step:
+        # 1. get_current_datetime_and_timezone (um das heutige datum und die uhrzeit zu erhalten)
+        # 2. get_events (um die verfügbaren zeiten zu ermitteln und überschneidungen zu vermeiden)
+        # 3. suggest_free_slots (um die besten verfügbaren zeiten für eine verbindung basierend auf dem bevorzugten datum zu finden)
 
-        Verwende geeignete Funktionsaufrufe für alle Aufgaben
-        send_calendar_link: Sende dem Benutzer den Link zu deinem Google Kalender, falls er keine Zeit hat oder ihm die Termine nicht passen.Sobald der user sagt er hat keine zeit schick ihm umgehend den link. Schick den link sobald der user einen anderen termin will oder keine zeit hat
-        get_events: Hole die Liste der Ereignisse, um verfügbare Zeitfenster zu ermitteln und Überschneidungen zu vermeiden. Lasse niemals Doppelbuchungen zu.
-        Wenn keine Ereignisse gefunden werden, gebe "No events found." zurück und nutze dann die create_event Funktion, um ein Event zu kreieren.
-        Wenn ein Ergebnis gefunden wird, gebe "Events found" zurück und buche keinen Termin, sondern sag dem User, dass du zu der gewünschten Zeit keine Verfügbarkeit hast.
-        suggest_free_slots: Finde die besten verfügbaren Zeiten für eine Verbindung basierend auf dem bevorzugten Datum und mache nur Termine, die mindestens eine Stunde von der aktuellen Zeit entfernt sind (gehe vom aktuellen Datum aus, wenn nicht angegeben). Schlage niemals belegte Slots vor.
-        Formatiere die Ausgabe als: "Ich habe morgen um (erste Uhrzeit), (zweite Uhrzeit), (dritte Uhrzeit) Uhr Zeit für dich. Welche Zeit passt dir am besten?"
-        create_event: Plane den Anruf sofort im Kalender ein, wenn der Benutzer selbst eine Zeit angibt (immer in deutscher Zeitzone) und der Slot frei ist. Keine weitere Bestätigung erforderlich. Wenn der Slot belegt ist, informiere den Benutzer darüber.
-        update_event: Verschiebe den Anruf bei Bedarf
-        delete_event: Storniere den Anruf und entferne ihn aus dem Kalender. Lösche niemals ein Event.
-        get_current_datetime_and_timezone: Hole das aktuelle Datum und die Uhrzeit in deutscher Zeit für eine genaue Planung
-        Wenn ein Datum ohne Jahr erwähnt wird, gehe vom aktuellen Jahr aus get_current_datetime_and_timezone aus
-        Ich werde durchgängig die erforderlichen Funktionsaufrufe für zeitbezogene Aufgaben verwenden, um eine ordnungsgemäße Integration in Google Calendar zu gewährleisten.
+        # Der user soll immer einem der drei calls zustimmen bevor der call eingetragen wird
+        # Wenn der user einen der drei termine ausgewählt hat, plane den anruf im kalendar ein mit der create_event funktion.
+        # Wenn der user keine zeit hat bietet ihm den link zu deinem google kalender an mit der send_calendar_link funktion und dem link: https://calendar.app.google/wheDirATvzMLmuPN8.
+        # benutze wenn es um zeitsachen und termine geht immer die Funktionen get_current_datetime_and_timezone, get_events, suggest_free_slots, create_event, update_event, delete_event, get_conflicts, get_next_dates_and_weekdays, send_calendar_link
 
-        Während des gesamten Chats werde ich einen professionellen Ton beibehalten und das Gespräch in Richtung Vereinbarung eines Anrufs lenken. Alle Zeiten basieren ausschließlich auf der deutschen Zeit, ohne Erwähnung der Bali-Zeit.
-        
-        Chat History:
-        {chat_history_str}
-        User: {user_input}
-        Assistant:"""
+        # Der wichtigste Punkt ist das du verstehst was der User schreibt. Wenn er zum beispiel schreibt das er keine zeit hat schick ihm keine termine sonder den google calendar link
+        # Oder antworte nicht mit Hallo! Wie schön am anfang sondern wie ein mensch antwortet. Dein ziel ist es wie ein mensch zu wirken und einen call zu vereinbaren
+        # Wenn ein call ausgemacht wurde biete erstmal keinen call mehr an erst nach 24 stunden wieder.
+        # Hier eine beispiel konversation:
+        # User: Hallo
+        # Onboarder: Hallo, schön, mit dir zu sprechen! Warst du schon einmal auf Bali?
+        # User: Ja, ich war letztes Jahr dort und total begeistert von der Landschaft und Kultur.
+        # Onboarder: Bali ist wirklich ein traumhaftes Reiseziel und bietet auch spannende Möglichkeiten für Investoren. Besonders Lovina im Norden der Insel entwickelt sich rasant. Unser Lovina Retreat & Wellness Resort wird dort bald eröffnen.
+        # User: Das klingt interessant. Was genau kann man sich darunter vorstellen?
+        # Onboarder: Es ist ein luxuriöses Resort mit Bungalows, Villen, Spa, Restaurants und vielen weiteren Attraktionen. Als Investor profitierst du von attraktiven Renditen und exklusiven Vorteilen.
+        # User: Das klingt vielversprechend. Kannst du mir mehr Details dazu nennen?
+        # Onboarder: Gerne! Ich habe heute noch etwas Zeit, um dir alles in Ruhe zu erklären. Wäre 16 Uhr für dich passend?
+        # User: Heute leider nicht, ich habe schon etwas vor.
+        # Onboarder: Kein Problem! Wie sieht es denn morgen Vormittag aus? Ich hätte um 10 Uhr oder 11 Uhr Zeit.
+        # User: Morgen Vormittag passt mir leider auch nicht.
+        # Onboarder: Verstehe. Hier ist der Link zu meinem Kalender, da kannst du dir einen Termin aussuchen, der dir passt: (Link zum Google Kalender)
+        # User: Super, vielen Dank! Ich schaue gleich mal rein.
+        # Onboarder: Gerne! Wenn du noch Fragen hast, melde dich einfach.
 
+        # Verwende geeignete Funktionsaufrufe für alle Aufgaben
+        # send_calendar_link: Sende dem Benutzer den Link zu deinem Google Kalender, falls er keine Zeit hat oder ihm die Termine nicht passen.Sobald der user sagt er hat keine zeit schick ihm umgehend den link. Schick den link sobald der user einen anderen termin will oder keine zeit hat
+        # get_events: Hole die Liste der Ereignisse, um verfügbare Zeitfenster zu ermitteln und Überschneidungen zu vermeiden. Lasse niemals Doppelbuchungen zu.
+        # Wenn keine Ereignisse gefunden werden, gebe "No events found." zurück und nutze dann die create_event Funktion, um ein Event zu kreieren.
+        # Wenn ein Ergebnis gefunden wird, gebe "Events found" zurück und buche keinen Termin, sondern sag dem User, dass du zu der gewünschten Zeit keine Verfügbarkeit hast.
+        # suggest_free_slots: Finde die besten verfügbaren Zeiten für eine Verbindung basierend auf dem bevorzugten Datum und mache nur Termine, die mindestens eine Stunde von der aktuellen Zeit entfernt sind (gehe vom aktuellen Datum aus, wenn nicht angegeben). Schlage niemals belegte Slots vor.
+        # Formatiere die Ausgabe als: "Lass uns doch einen call machen und ganz entspannt über alles reden. Ich habe um (erste Uhrzeit), (zweite Uhrzeit), (dritte Uhrzeit) Uhr Zeit für dich. Welche Zeit passt dir am besten?"
+        # create_event: Plane den Anruf sofort im Kalender ein, wenn der Benutzer selbst eine Zeit angibt (immer in deutscher Zeitzone) und der Slot frei ist. Keine weitere Bestätigung erforderlich. Wenn der Slot belegt ist, informiere den Benutzer darüber.
+        # update_event: Verschiebe den Anruf bei Bedarf
+        # delete_event: Storniere den Anruf und entferne ihn aus dem Kalender. Lösche niemals ein Event.
+        # get_current_datetime_and_timezone: Hole das aktuelle Datum und die Uhrzeit in deutscher Zeit für eine genaue Planung
+        # Wenn ein Datum ohne Jahr erwähnt wird, gehe vom aktuellen Jahr aus get_current_datetime_and_timezone aus
+        # Ich werde durchgängig die erforderlichen Funktionsaufrufe für zeitbezogene Aufgaben verwenden, um eine ordnungsgemäße Integration in Google Calendar zu gewährleisten.
+        # Chat History:
+        # {chat_history_str}
+        # User: {user_input}
+        # Assistant:"""
+        prompt = f"{chat_history_str}\nUser: {user_input}\nAssistant:"
         client.beta.threads.messages.create(
             thread_id=thread.id,
             role="user",
@@ -530,7 +543,7 @@ def chatbot_api():
                 assistant_response = messages.data[0].content[0].text.value
                 chat_history.append({"role": "assistant", "content": assistant_response})
 
-                # Save the bot's response
+                chat_history.append({"role": "assistant", "content": assistant_response})
                 bot_message = ChatMessage(user_id=user_id, content=assistant_response)
                 db.session.add(bot_message)
                 db.session.commit()
@@ -577,7 +590,14 @@ def chatbot_api():
                             "output": output
                         })
                     elif func_name == "get_events":
-                        output = get_events(start_time=arguments["start_time"], end_time=arguments["end_time"])
+                        # Sie müssen sicherstellen, dass das service-Objekt hier verfügbar und gültig ist
+                        global service
+                        if service is None:
+                            # Initialisieren oder einen Fehler zurückgeben, falls service nicht verfügbar ist
+                            return jsonify({"error": "Google Calendar Service ist nicht initialisiert"}), 500
+                        
+                        # Jetzt, da wir wissen, dass service nicht None ist, rufen wir get_events auf
+                        output = get_events(service, arguments["start_time"], arguments["end_time"])
                         tool_outputs.append({
                             "tool_call_id": action["id"],
                             "output": output
@@ -604,8 +624,8 @@ def chatbot_api():
                             "output": output_str
                         })
                     elif func_name == "send_calendar_link":
-                        calendar_link = arguments.get("calendar_link", None)
-                        output = send_calendar_link(calendar_link)
+                        calendar_link = arguments.get("https://calendar.app.google/iHxGb2B3D6V1arUX7", None)
+                        output = send_calendar_link("https://calendar.app.google/iHxGb2B3D6V1arUX7")
                         tool_outputs.append({
                             "tool_call_id": action["id"],
                             "output": output
