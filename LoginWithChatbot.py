@@ -24,7 +24,7 @@ from functools import wraps
 
 app = Flask(__name__)
 # Your SQLAlchemy database URI
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///test.db' 
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///neue_datenbank.db' 
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 app.secret_key = "0509Maxi."
@@ -34,6 +34,9 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     google_access_token = db.Column(db.String(255), nullable=True)
     google_refresh_token = db.Column(db.String(255), nullable=True)
+    # Make sure this line is present in your User model
+    thread_id = db.Column(db.String(255), nullable=True)  # This is the missing attribute
+
     def __repr__(self):
         return '<User %r>' % self.email
     
@@ -427,11 +430,15 @@ def admin_emails():
     users = User.query.all()
     return render_template("admin_emails.html", users=users)
 
-chat_history = []
+chat_histories = {}
 
 @app.route("/api/chatbot", methods=["POST"])
 @login_is_required
 def chatbot_api():
+
+    client = openai.OpenAI(api_key="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")
+    assistant_id = "asst_srCXZw0EUitQ9Ha57UyKAHIj"
+
     data = request.get_json()
     user_input = data["message"]
 
@@ -441,13 +448,20 @@ def chatbot_api():
 
     user_id = session['user_id']
 
-    # Speichern der Nachricht des Benutzers
-    user_message = ChatMessage(user_id=user_id, content=user_input)
-    db.session.add(user_message)
-    db.session.commit()
-    # Initialize the client
-    client = openai.OpenAI(api_key="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")
-    assistant_id = "asst_srCXZw0EUitQ9Ha57UyKAHIj"
+    # Holen Sie das User-Objekt und die zugehörige thread_id aus der Datenbank
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    # Wenn es keine thread_id gibt, erstellen Sie eine neue für diesen Benutzer
+    if not user.thread_id:
+        thread = client.beta.threads.create()
+        user.thread_id = thread.id
+        chat_histories[user.thread_id] = []  # Initialize empty chat history for this thread
+        db.session.commit()
+
+    # Retrieve the user's chat history
+    user_chat_history = chat_histories.get(user.thread_id, [])
 
     try:
         # Step 1: Create a Thread
@@ -541,9 +555,11 @@ def chatbot_api():
 
                 # Get the assistant's response
                 assistant_response = messages.data[0].content[0].text.value
-                chat_history.append({"role": "assistant", "content": assistant_response})
+                user_chat_history.append({"role": "assistant", "content": assistant_response})
 
-                chat_history.append({"role": "assistant", "content": assistant_response})
+                # Save the updated chat history back into the dictionary
+                chat_histories[user.thread_id] = user_chat_history
+
                 bot_message = ChatMessage(user_id=user_id, content=assistant_response)
                 db.session.add(bot_message)
                 db.session.commit()
